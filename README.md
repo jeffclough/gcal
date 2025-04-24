@@ -1,4 +1,4 @@
-# Patrick
+# GCal
 
 ## Description
 Access your Google Calendar from the command line.
