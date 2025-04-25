@@ -4,6 +4,27 @@
 Access your Google Calendar from the command line.
 Use the gcal command to maintain a database of email contacts for people who have expressed an interest in helping Patrick and family during his treatments.
 
+## Usage
+```
+usage: gcal [-h] [--debug] [--before YYYY-MM-DD] [--max N]
+            [--since YYYY-MM-DD]
+            [CALENDAR ...]
+
+positional arguments:
+  CALENDAR             The name(s) of one or more calendars to be searched. By
+                       default, all calendars are searched.
+
+options:
+  -h, --help           show this help message and exit
+  --debug              Turn on debugging output.
+  --before YYYY-MM-DD  Latest date to search for calendar entries. (default:
+                       2025-05-24 00:00:00)
+  --max N              If given, this is the maximum number of entries to
+                       find.
+  --since YYYY-MM-DD   Earliest date to search for calendar entries. (default:
+                       2025-04-24 00:00:00)
+```
+
 ## Installation
 If you don't have pipx installed either run `pip3 install pipx`, or if that gives you an "externally-managed-environment" complaint, use whatever package manager is right for your operating system.
 
