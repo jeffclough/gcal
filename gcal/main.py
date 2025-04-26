@@ -22,6 +22,46 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+dc=DebugChannel(label='D')
+
+# Consider adding mkdirs to the "handy" package.
+def mkdirs(path,mode=0o777):
+    """
+    This is very similar to os.mkpath(), but any missing parent
+    directories will be created (if possible), and if path already
+    exists, no exception is raised (so long as the thing that exists
+    is a directory).
+
+    If a conflicting non-directory item is found while creating path or
+    any of its parent directories, a FileExistsError error is raised.
+    """
+
+    @dc # Add debugging to this function.
+    def _mkdirs(path,mode):
+        # Maybe the directory already exists.
+        if os.path.exists(path):
+            if os.path.isdir(path):
+                return # All is well.
+            else:
+                raise FileExistsError(f"{path!r} already exists as something other than a directory.")
+        # Try to create this directory.
+        parent=None
+        try:
+            os.mkdir(path,mode)
+        except FileNotFoundError as e:
+            # Record the name of the parent directory to be created.
+            parent=os.path.dirname(path)
+            if parent=='/':
+                raise e
+        if parent:
+            # Create the parent directory (and any parents thereof).
+            _mkdirs(parent,mode)
+            # Create the directory our caller requested.
+            os.mkdir(path,mode)
+
+    path=os.path.abspath(path)
+    _mkdirs(path,mode)
+
 # Set the default number of days ahead to search.
 DEFAULT_CALENDAR_WINDOW=30
 
@@ -29,11 +69,53 @@ DEFAULT_CALENDAR_WINDOW=30
 # Calendar API.
 TZ=ZoneInfo('America/New_York')
 
-dc=DebugChannel(label='D')
-
 # If modifying these scopes, delete the token.json file.
 # Use 'https://www.googleapis.com/auth/calendar' for write access
 SCOPES=['https://www.googleapis.com/auth/calendar.readonly']
+
+#
+# Make sure our application directory exists. Our Google API credentials
+# are stored here, so make it a private directory.
+#
+app_dir=os.path.expanduser(f"~/.local/{prog.name}")
+mkdirs(app_dir,0o700) 
+fn_auth_tokens=os.path.join(app_dir,'token.json')
+fn_credentials=os.path.join(app_dir,'credentials.json')
+calendar_name='PRC Driving'
+
+# Whether and where to record API responses.
+RECORD_RESPONSES=False
+RESPONSES_FILE=os.path.join(app_dir,'api-responses')
+if RECORD_RESPONSES and os.path.exists(RESPONSES_FILE):
+    # Remove our responses file because we append responses to it.
+    os.path.unlink(RESPONSES_FILE)
+
+#
+# See what's on our command line.
+#
+now=dt.datetime.now()
+today=now-dt.timedelta(
+    hours=now.hour,
+    minutes=now.minute,
+    seconds=now.second,
+    microseconds=now.microsecond
+)
+ap=ArgumentParser()
+ap.add_argument('--debug',action='store_true',help="Turn on debugging output.")
+ap.add_argument('--before',metavar='YYYY-MM-DD',action='store',type=dt.datetime.fromisoformat,default=today+dt.timedelta(days=DEFAULT_CALENDAR_WINDOW),help="Latest date to search for calendar entries. (default: %(default)s)")
+ap.add_argument('--max',metavar='N',action='store',type=positive_int,default=None,help="If given, this is the maximum number of entries to find.")
+ap.add_argument('--since',metavar='YYYY-MM-DD',action='store',type=dt.date.fromisoformat,default=today,help="Earliest date to search for calendar entries. (default: %(default)s)")
+ap.add_argument('calendars',metavar='CALENDAR',type=CaselessString,nargs='*',action='store',help="The name(s) of one or more calendars to be searched. By default, all calendars are searched.")
+opt=ap.parse_args()
+dc.enable(opt.debug)
+if dc:
+    dc(f"{opt.before=}")
+    dc(f"{opt.max=}")
+    dc(f"{opt.since=}")
+    dc(f"{opt.calendars=}")
+
+ # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 
 class CalendarEvent():
     def __init__(self,event_dict):
@@ -84,77 +166,10 @@ class CalendarEvent():
             s=f"{self.start} - {self.end}: {self.name} ({self.calendar})"
         return s
 
-def mkdirs(path,mode=0o777):
+def authenticate():
     """
-    This is very similar to os.mkpath(), but any missing parent
-    directories will be created (if possible), and if path already
-    exists, no exception is raised (so long as the thing that exists
-    is a directory).
-
-    If a conflicting non-directory item is found while creating path or
-    any of its parent directories, a FileExistsError error is raised.
+    Return the authenticated API service.
     """
-
-    @dc # Add debugging to this function.
-    def _mkdirs(path,mode):
-        # Maybe the directory already exists.
-        if os.path.exists(path):
-            if os.path.isdir(path):
-                return # All is well.
-            else:
-                raise FileExistsError(f"{path!r} already exists as something other than a directory.")
-        # Try to create this directory.
-        parent=None
-        try:
-            os.mkdir(path,mode)
-        except FileNotFoundError as e:
-            # Record the name of the parent directory to be created.
-            parent=os.path.dirname(path)
-            if parent=='/':
-                raise e
-        if parent:
-            # Create the parent directory (and any parents thereof).
-            _mkdirs(parent,mode)
-            # Create the directory our caller requested.
-            os.mkdir(path,mode)
-
-    path=os.path.abspath(path)
-    _mkdirs(path,mode)
-            
-def main():
-    #
-    # See what's on our command line.
-    #
-    now=dt.datetime.now()
-    today=now-dt.timedelta(
-        hours=now.hour,
-        minutes=now.minute,
-        seconds=now.second,
-        microseconds=now.microsecond
-    )
-    ap=ArgumentParser()
-    ap.add_argument('--debug',action='store_true',help="Turn on debugging output.")
-    ap.add_argument('--before',metavar='YYYY-MM-DD',action='store',type=dt.datetime.fromisoformat,default=today+dt.timedelta(days=DEFAULT_CALENDAR_WINDOW),help="Latest date to search for calendar entries. (default: %(default)s)")
-    ap.add_argument('--max',metavar='N',action='store',type=positive_int,default=None,help="If given, this is the maximum number of entries to find.")
-    ap.add_argument('--since',metavar='YYYY-MM-DD',action='store',type=dt.date.fromisoformat,default=today,help="Earliest date to search for calendar entries. (default: %(default)s)")
-    ap.add_argument('calendars',metavar='CALENDAR',type=CaselessString,nargs='*',action='store',help="The name(s) of one or more calendars to be searched. By default, all calendars are searched.")
-    opt=ap.parse_args()
-    dc.enable(opt.debug)
-    if dc:
-        dc(f"{opt.before=}")
-        dc(f"{opt.max=}")
-        dc(f"{opt.since=}")
-        dc(f"{opt.calendars=}")
-
-    #
-    # Make sure our application directory exists. Our Google API credentials
-    # are stored here, so make it a private directory.
-    #
-    app_dir=os.path.expanduser(f"~/.local/{prog.name}")
-    mkdirs(app_dir,0o700) 
-    fn_auth_tokens=os.path.join(app_dir,'token.json')
-    fn_credentials=os.path.join(app_dir,'credentials.json')
-    calendar_name='PRC Driving'
 
     #
     # Set up an authenticated Google Calendar API service.
@@ -176,10 +191,57 @@ def main():
         with open(fn_auth_tokens,'w') as token:
             token.write(creds.to_json())
 
+    service=build('calendar','v3',credentials=creds)
+    dc("Successfully authenticated and built the Google Calendar API service.")
+    # You can now use the 'service' object to interact with your calendar.
+
+    # For diagnostic and exploratory purposes, it is helpful to be able
+    # to see the raw response dictionary the API returns.
+    if RECORD_RESPONSES:
+        from pprint import pprint
+        with open(RESPONSES_FILE,'a') as f:
+            print('\n---- service ----',file=f)
+            pprint(service.__dict__,stream=f,width=200)
+
+    return service
+
+def get_calendar_entries(service,calendar_id):
+    """
+    Given an active Calendar API service and the ID of a calendar,
+    return a list of CalendarEvent instances from that calendar.
+    """
+
+    res=service.events().list(calendarId=calendar_id,
+                              timeMin=opt.since.isoformat()+'Z',
+                              timeMax=opt.before.isoformat()+'Z',
+                              maxResults=30,singleEvents=True,
+                              orderBy='startTime'
+                         ).execute()
+    # For diagnostic and exploratory purposes, it is helpful to be able
+    # to see the raw response dictionary the API returns.
+    if RECORD_RESPONSES:
+        from pprint import pprint
+        with open(RESPONSES_FILE,'a') as f:
+            print('\n---- service ----',file=f)
+            pprint(res,stream=f,width=200)
+
+    # Remember this calendar's default timezone.
+    TZ=res.get('timeZone')
+    if TZ is None:
+        die(f"Google's Calendar API reports no default timezone for your account.")
+    dc(f"Setting default timezone to {TZ} ...")
+    TZ=ZoneInfo(TZ)
+
+    # Get our list of event dictionaries from the API's response.
+    # Convert them to CalendarEvent instances for easier handling.
+    events=res.get('items',[])
+    return [CalendarEvent(e) for e in events]
+            
+def main():
     try:
-        service=build('calendar','v3',credentials=creds)
-        dc("Successfully authenticated and built the Google Calendar API service.")
-        # You can now use the 'service' object to interact with your calendar.
+        # Authenticate and connect to the Google Calendar API service.
+        service=authenticate()
+
         # Get the ID of each calendar we're interested in.
         calendar_list=service.calendarList().list().execute()
         calendars=[
@@ -201,35 +263,9 @@ def main():
         # Get entries from our list of calendars.
         entries=[]
         for cname,cid in calendars.items():
-            dc(f"{cname} ({cid})").indent()
-            res=service.events().list(calendarId=cid,
-                                      timeMin=opt.since.isoformat()+'Z',
-                                      timeMax=opt.before.isoformat()+'Z',
-                                      maxResults=30,singleEvents=True,
-                                      orderBy='startTime'
-                                 ).execute()
-            #from pprint import pprint
-            #pprint(res)
-            #sys.exit(0)
-            TZ=res.get('timeZone')
-            if TZ is None:
-                die(f"Google's Calendar API reports no default timezone for your account.")
-            dc(f"Setting default timezone to {TZ} ...")
-            TZ=ZoneInfo(TZ)
-#            now=dt.datetime.utcnow().isoformat()+'Z'
-#            dc(f"{now=}")
-#            res=service.events().list(calendarId='0c3a561627cb58fbe2e44dbb70dc6628e4b22b3cecb27573aa15cce4fa84dc7a@group.calendar.google.com', timeMin=now,maxResults=30, singleEvents=True,orderBy='startTime').execute()
-            events=res.get('items',[])
-            dc(f"Events found: {len(events)}")
-            for e in events:
-                event=CalendarEvent(e)
-                # This is for debugging the calendar event dictionary
-                # returned from the API.
-                #dc(e)
-                # This is for debugging the value of CalendarEvent
-                # instnace we created from the dictionary.
-                dc(str(event))
-                entries.append(event)
+            dc(f"{cname} (id={cid})").indent()
+            events=get_calendar_entries(service,cid)
+            entries.extend(events)
             dc.undent()
 
         # Sort our CalenderEvent objects by start time.
@@ -240,25 +276,6 @@ def main():
             #start=e['start'].get('dateTime',e['start'].get('date'))
             #print(start,e['summary'])
             print(e)
-
-#        for calendar in calendars:
-#            dc(f"Summary: {calendar.get('summary')}, ID: {calendar.get('id')}")
-#            if calendar.get('summary')==calendar_name:
-#                # List this calendar's upcoming events:
-#                now = dt.datetime.utcnow().isoformat() + 'Z'
-#                events_result = service.events().list(calendarId='0c3a561627cb58fbe2e44dbb70dc6628e4b22b3cecb27573aa15cce4fa84dc7a@group.calendar.google.com', timeMin=now,
-#                                                      maxResults=30, singleEvents=True,
-#                                                      orderBy='startTime').execute()
-#                events = events_result.get('items', [])
-#
-#                if not events:
-#                    print('No upcoming events found.')
-#                    break
-#
-#                print('Upcoming events:')
-#                for event in events:
-#                    start = event['start'].get('dateTime',event['start'].get('date'))
-#                    print(start, event['summary'])
 
     except HttpError as error:
         raise
