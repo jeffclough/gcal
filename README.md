@@ -6,23 +6,27 @@ Use the gcal command to maintain a database of email contacts for people who hav
 
 ## Usage
 ```
-usage: gcal [-h] [--debug] [--before YYYY-MM-DD] [--max N]
-            [--since YYYY-MM-DD]
+usage: gcal [-h] [--attachments] [--debug] [--end YYYY-MM-DD] [--list]
+            [--location] [--max N] [--notes] [--start YYYY-MM-DD]
             [CALENDAR ...]
 
 positional arguments:
-  CALENDAR             The name(s) of one or more calendars to be searched. By
-                       default, all calendars are searched.
+  CALENDAR            The name(s) of one or more calendars to be searched. By
+                      default, all calendars are searched.
 
 options:
-  -h, --help           show this help message and exit
-  --debug              Turn on debugging output.
-  --before YYYY-MM-DD  Latest date to search for calendar entries. (default:
-                       2025-05-24 00:00:00)
-  --max N              If given, this is the maximum number of entries to
-                       find.
-  --since YYYY-MM-DD   Earliest date to search for calendar entries. (default:
-                       2025-04-24 00:00:00)
+  -h, --help          show this help message and exit
+  --attachments       Show attachments for each event that has at least one.
+  --debug             Turn on debugging output.
+  --end YYYY-MM-DD    Latest date to search for calendar entries. (default:
+                      2025-07-25)
+  --list              List the calendars available to the current user. Then
+                      quit.
+  --location          Show the location for each event that has a location.
+  --max N             If given, this is the maximum number of entries to find.
+  --notes             Show notes for each event that has notes.
+  --start YYYY-MM-DD  Earliest date to search for calendar entries. (default:
+                      2025-04-26)
 ```
 
 ## Installation
