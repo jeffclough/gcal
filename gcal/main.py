@@ -11,6 +11,7 @@ https://cloud.google.com
 
 import datetime as dt,os,re,sys
 from argparse import ArgumentParser
+from pprint import pprint
 from zoneinfo import ZoneInfo
 
 from debug import DebugChannel
@@ -63,11 +64,17 @@ def mkdirs(path,mode=0o777):
     _mkdirs(path,mode)
 
 # Set the default number of days ahead to search.
-DEFAULT_CALENDAR_WINDOW=30
+DEFAULT_CALENDAR_WINDOW=90
+
+# For adding one day to a date or datetime.
+ONE_DAY=dt.timedelta(days=1)
 
 # Our default timezone is updated after we connect to Google's
 # Calendar API.
 TZ=ZoneInfo('America/New_York')
+
+# Remove this prefix from auto-generated events' notes.
+AUTOGEN_WARNING='To see detailed information for automatically created events like this one, use the official Google Calendar app. https://g.co/calendar\n\n'
 
 # If modifying these scopes, delete the token.json file.
 # Use 'https://www.googleapis.com/auth/calendar' for write access
@@ -84,11 +91,11 @@ fn_credentials=os.path.join(app_dir,'credentials.json')
 calendar_name='PRC Driving'
 
 # Whether and where to record API responses.
-RECORD_RESPONSES=False
+RECORD_RESPONSES=True
 RESPONSES_FILE=os.path.join(app_dir,'api-responses')
 if RECORD_RESPONSES and os.path.exists(RESPONSES_FILE):
     # Remove our responses file because we append responses to it.
-    os.path.unlink(RESPONSES_FILE)
+    os.unlink(RESPONSES_FILE)
 
 #
 # See what's on our command line.
@@ -101,17 +108,24 @@ today=now-dt.timedelta(
     microseconds=now.microsecond
 )
 ap=ArgumentParser()
+ap.add_argument('--attachments',action='store_true',help="Show attachments for each event that has at least one.")
 ap.add_argument('--debug',action='store_true',help="Turn on debugging output.")
-ap.add_argument('--before',metavar='YYYY-MM-DD',action='store',type=dt.datetime.fromisoformat,default=today+dt.timedelta(days=DEFAULT_CALENDAR_WINDOW),help="Latest date to search for calendar entries. (default: %(default)s)")
+ap.add_argument('--end',metavar='YYYY-MM-DD',action='store',type=dt.datetime.fromisoformat,default=today+dt.timedelta(days=DEFAULT_CALENDAR_WINDOW),help="Latest date to search for calendar entries. (default: %(default).10s)")
+ap.add_argument('--list',action='store_true',help="List the calendars available to the current user. Then quit.")
+ap.add_argument('--location',action='store_true',help="Show the location for each event that has a location.")
 ap.add_argument('--max',metavar='N',action='store',type=positive_int,default=None,help="If given, this is the maximum number of entries to find.")
-ap.add_argument('--since',metavar='YYYY-MM-DD',action='store',type=dt.date.fromisoformat,default=today,help="Earliest date to search for calendar entries. (default: %(default)s)")
+ap.add_argument('--notes',action='store_true',help="Show notes for each event that has notes.")
+ap.add_argument('--start',metavar='YYYY-MM-DD',action='store',type=dt.datetime.fromisoformat,default=today,help="Earliest date to search for calendar entries. (default: %(default).10s)")
 ap.add_argument('calendars',metavar='CALENDAR',type=CaselessString,nargs='*',action='store',help="The name(s) of one or more calendars to be searched. By default, all calendars are searched.")
 opt=ap.parse_args()
 dc.enable(opt.debug)
 if dc:
-    dc(f"{opt.before=}")
+    dc(f"{opt.end=}")
+    dc(f"{opt.list=}")
+    dc(f"{opt.location=}")
     dc(f"{opt.max=}")
-    dc(f"{opt.since=}")
+    dc(f"{opt.notes=}")
+    dc(f"{opt.start=}")
     dc(f"{opt.calendars=}")
 
  # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -120,9 +134,19 @@ if dc:
 class CalendarEvent():
     def __init__(self,event_dict):
         """
-        Set our start, end, calendar, and name properties based on the
-        event dectionary returned by the Google Calendar API. Raise
-        ValueError if this dictionary doesn't look like a calendar
+        Set these properties based on the given calendar dictionary
+        returned by the Google Calendar API:
+
+            start (datetime)
+            end (datetime)
+            allday (boolean)
+            calendar (str)
+            name (str)
+            location (str)
+            notes (str)
+            attachments (list)
+
+        Raise ValueError if this dictionary doesn't look like a calendar
         event.
         """
 
@@ -159,12 +183,66 @@ class CalendarEvent():
         # The name is comparatively straight-forward.
         self.name=ed.get('summary','UNKNOWN')
 
+        # Location
+        self.location=ed.get('location','')
+
+        # Notes
+        self.notes=ed.get('description','')
+        if self.notes.startswith(AUTOGEN_WARNING):
+            if 'htmlLink' in ed:
+                link=ed['htmlLink']
+                self.notes=f"See {link} for these notes auto-generated from email."
+            else:
+                self.notes=self.notes[len(AUTOGEN_WARNING):]
+
+        # If attachments are available, they'll be available in our attachments
+        # property as a list of anonymous objects, a, where a.title and
+        # a.fileURL hold the English description and URL of the attachment,
+        # respectively. If there are no attachments, self.attachments will be
+        # an empty list.
+
+        self.attachments=[
+            type('',(),({
+                    k:v
+                        for k,v in a.items()
+                            if k in ('fileUrl','title')
+                }))
+                    for a in ed.get('attachments',[])
+        ]
+
+        # So, e.g., you can iterate through attachments of CalendarEvent e like this:
+        #
+        # for a in e.attachments:
+        #     print(f"{a.title}: {a.fileUrl}")
+
     def __str__(self):
         if self.allday:
-            s=f"{str(self.start):.10}: {self.name} ({self.calendar})"
+            when=f"{str(self.start):.10}:               "
+            s=[f"{self.name} ({self.calendar})"]
         else:
-            s=f"{self.start} - {self.end}: {self.name} ({self.calendar})"
-        return s
+            if self.start.date()==self.end.date():
+                when=f"{str(self.start):.16} - {str(self.end)[11:16]}: "
+            else:
+                when=f"{str(self.start):.16} - {str(self.end):.16}: "
+            s=[f"{self.name} ({self.calendar})"]
+        if opt.attachments and self.attachments:
+            if len(self.attachments)==1:
+                s.extend([
+                    f"Attachment:",
+                    f"  {self.attachments[0].title}: {self.attachments[0].fileUrl}"
+                ])
+            else:
+                s.append("Attachments:")
+                s.extend(
+                    f"  {i+1}. {a.title}: {a.fileUrl}"
+                        for i,a in enumerate(self.attachments)
+                )
+        if opt.location and self.location:
+            s.append(f"Location: {self.location}")
+        if opt.notes and self.notes:
+            s.extend(self.notes.split('\n')) # self.notes might contain its own newlines.
+        dc(s)
+        return when+(('\n'+' '*26)).join(s)
 
 def authenticate():
     """
@@ -198,37 +276,44 @@ def authenticate():
     # For diagnostic and exploratory purposes, it is helpful to be able
     # to see the raw response dictionary the API returns.
     if RECORD_RESPONSES:
-        from pprint import pprint
         with open(RESPONSES_FILE,'a') as f:
             print('\n---- service ----',file=f)
             pprint(service.__dict__,stream=f,width=200)
 
     return service
 
-def get_calendar_entries(service,calendar_id):
+def get_calendar_events(service,calendar_id):
     """
     Given an active Calendar API service and the ID of a calendar,
     return a list of CalendarEvent instances from that calendar.
     """
 
+    global TZ
+
+    # Set up timezones for opt.start and opt.end if they have none.
+    if opt.start.tzinfo is None:
+        opt.start=opt.start.replace(tzinfo=ZoneInfo(str(TZ)))
+        opt.end=opt.end.replace(tzinfo=ZoneInfo(str(TZ)))
+
     res=service.events().list(calendarId=calendar_id,
-                              timeMin=opt.since.isoformat()+'Z',
-                              timeMax=opt.before.isoformat()+'Z',
-                              maxResults=30,singleEvents=True,
+                              #timeMin=opt.start.isoformat()+'Z',
+                              #timeMax=opt.end.isoformat()+'Z',
+                              timeMin=opt.start.isoformat(),
+                              timeMax=(opt.end+ONE_DAY).isoformat(),
+                              maxResults=1000,singleEvents=True,
                               orderBy='startTime'
                          ).execute()
     # For diagnostic and exploratory purposes, it is helpful to be able
     # to see the raw response dictionary the API returns.
     if RECORD_RESPONSES:
-        from pprint import pprint
         with open(RESPONSES_FILE,'a') as f:
-            print('\n---- service ----',file=f)
+            print('\n---- calendar ----',file=f)
             pprint(res,stream=f,width=200)
 
     # Remember this calendar's default timezone.
     TZ=res.get('timeZone')
     if TZ is None:
-        die(f"Google's Calendar API reports no default timezone for your account.")
+        die(f"Google's Calendar API reports no default timezone for the {calendar_id} calendar.")
     dc(f"Setting default timezone to {TZ} ...")
     TZ=ZoneInfo(TZ)
 
@@ -250,32 +335,42 @@ def main():
         ]
         dc(f"Calendars found: {len(calendars)}")
         dc(f"Subtracting Google's group calendars (Weather, etc.) and any calendars not given on the command line ...")
-        # Convert this list of tuples to a dictionary, filtering as we go.
+        # Convert this list of tuples to a {name:id) dictionary, filtering
+        # as we go.
         calendars={
             cname:cid
             for cname,cid in calendars
                 if not cid.endswith('@group.v.calendar.google.com')
-                    and (opt.calendars and cname in opt.calendars)
-                #if opt.calendars and c.get('summary') in opt.calendars
+                    and (not opt.calendars or cname in opt.calendars)
         }
-        dc(f"Calendars found: {len(calendars)}")
 
-        # Get entries from our list of calendars.
-        entries=[]
+        if opt.list:
+            # Show available calendars, and quit.
+            l=[CaselessString(s) for s in calendars.keys()]
+            l.sort()
+            print('\n'.join(l))
+            sys.exit(0)
+
+        # Get CalendarEvent items from our list of calendars.
+        dc(f"Calendars found: {len(calendars)}")
+        events=[]
         for cname,cid in calendars.items():
-            dc(f"{cname} (id={cid})").indent()
-            events=get_calendar_entries(service,cid)
-            entries.extend(events)
+            dc(f"Calendar {cname} (id={cid})").indent()
+            events.extend(get_calendar_events(service,cid))
             dc.undent()
 
         # Sort our CalenderEvent objects by start time.
-        entries.sort(key=lambda e:e.start)
+        events.sort(key=lambda e:e.start)
+
+        if opt.max and opt.max<len(events):
+            del events[opt.max:]
 
         # Show the user what we've found.
-        for e in entries:
-            #start=e['start'].get('dateTime',e['start'].get('date'))
-            #print(start,e['summary'])
+        while events:
+            e=events.pop(0)
             print(e)
+            if events:
+                print(25*'-')
 
     except HttpError as error:
         raise
