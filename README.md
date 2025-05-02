@@ -46,4 +46,4 @@ Once pipx is installed, run `pipx install gcal` to install it to your `~/.local`
    credentials.json. Store it in your ~/.local/gcal directory.
 3. Enable the Google Calendar API for the gcal project.
 
-I'm using OAuth 2, but if you prefer (against all sound advice) to use an API key, the steps above will be different (and you'll have to modify the code at `service=...`.
+I'm using OAuth 2, but if you prefer (against all sound advice) to use an API key, the steps above will be different (and you'll have to modify the code at `service=...`).
