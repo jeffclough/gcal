@@ -9,7 +9,7 @@ https://cloud.google.com
 3. Enable the Google Calendar API for the gcal project.
 """
 
-import datetime as dt,os,re,sys
+import datetime as dt,json,os,re,sys,zoneinfo
 from argparse import ArgumentParser
 from pprint import pprint
 from zoneinfo import ZoneInfo
@@ -24,6 +24,8 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 dc=DebugChannel(label='D')
+
+tz_local=dt.timezone(dt.timedelta(days=-1, seconds=68400), 'CDT')
 
 # Consider adding mkdirs to the "handy" package.
 def mkdirs(path,mode=0o777):
@@ -127,6 +129,20 @@ if dc:
     dc(f"{opt.notes=}")
     dc(f"{opt.start=}")
     dc(f"{opt.calendars=}")
+
+# Delete our token.json file if this token has expired. This will lead the
+# API to re-authenticate and create a new token good for an hour.
+if os.path.exists(fn_auth_tokens):
+    dc(f"Token file ({fn_auth_tokens}) exists.")
+    with open(fn_auth_tokens) as f:
+        t=json.load(f)
+    x=dt.datetime.fromisoformat(t['expiry']).astimezone(tz_local)
+    dc(f"Token expires {x}")
+    if x<dt.datetime.now().replace(tzinfo=tz_local):
+        dc(f"Deleting expired token file ({fn_auth_tokens}). (Will re-authenticate.)")
+        os.unlink(fn_auth_tokens)
+else:
+    dc(f"Token file ({fn_auth_tokens}) not found. (Will re-authenticate.)")
 
  # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
