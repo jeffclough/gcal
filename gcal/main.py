@@ -25,55 +25,27 @@ from googleapiclient.errors import HttpError
 
 dc=DebugChannel(label='D')
 
-tz_local=dt.timezone(dt.timedelta(days=-1, seconds=68400), 'CDT')
+# Get fixed values for the local day and time.
+now=dt.datetime.now().astimezone()
+today=now-dt.timedelta(
+    hours=now.hour,
+    minutes=now.minute,
+    seconds=now.second,
+    microseconds=now.microsecond
+)
 
-# Consider adding mkdirs to the "handy" package.
-def mkdirs(path,mode=0o777):
-    """
-    This is very similar to os.mkpath(), but any missing parent
-    directories will be created (if possible), and if path already
-    exists, no exception is raised (so long as the thing that exists
-    is a directory).
+# Get local timezone.
+tz_local=now.tzinfo
 
-    If a conflicting non-directory item is found while creating path or
-    any of its parent directories, a FileExistsError error is raised.
-    """
-
-    @dc # Add debugging to this function.
-    def _mkdirs(path,mode):
-        # Maybe the directory already exists.
-        if os.path.exists(path):
-            if os.path.isdir(path):
-                return # All is well.
-            else:
-                raise FileExistsError(f"{path!r} already exists as something other than a directory.")
-        # Try to create this directory.
-        parent=None
-        try:
-            os.mkdir(path,mode)
-        except FileNotFoundError as e:
-            # Record the name of the parent directory to be created.
-            parent=os.path.dirname(path)
-            if parent=='/':
-                raise e
-        if parent:
-            # Create the parent directory (and any parents thereof).
-            _mkdirs(parent,mode)
-            # Create the directory our caller requested.
-            os.mkdir(path,mode)
-
-    path=os.path.abspath(path)
-    _mkdirs(path,mode)
+# Our default timezone is updated after we connect to Google's Calendar
+# API, but we'll use the local timezone as a starting value.
+tz_cal=tz_local
 
 # Set the default number of days ahead to search.
 DEFAULT_CALENDAR_WINDOW=90
 
 # For adding one day to a date or datetime.
 ONE_DAY=dt.timedelta(days=1)
-
-# Our default timezone is updated after we connect to Google's
-# Calendar API.
-TZ=ZoneInfo('America/New_York')
 
 # Remove this prefix from auto-generated events' notes.
 AUTOGEN_WARNING='To see detailed information for automatically created events like this one, use the official Google Calendar app. https://g.co/calendar\n\n'
@@ -87,28 +59,21 @@ SCOPES=['https://www.googleapis.com/auth/calendar.readonly']
 # are stored here, so make it a private directory.
 #
 app_dir=os.path.expanduser(f"~/.local/{prog.name}")
-mkdirs(app_dir,0o700) 
-fn_auth_tokens=os.path.join(app_dir,'token.json')
+os.makedirs(app_dir,0o700,exist_ok=True)
 fn_credentials=os.path.join(app_dir,'credentials.json')
-calendar_name='PRC Driving'
+fn_auth_token=os.path.join(app_dir,'token.json')
 
 # Whether and where to record API responses.
-RECORD_RESPONSES=True
+RECORD_RESPONSES=bool(dc) # Tie this to whether we're writing debug messsages.
 RESPONSES_FILE=os.path.join(app_dir,'api-responses')
 if RECORD_RESPONSES and os.path.exists(RESPONSES_FILE):
-    # Remove our responses file because we append responses to it.
+    # Remove our responses file because we append responses to it, and we
+    # want only responses from the current run.
     os.unlink(RESPONSES_FILE)
 
 #
 # See what's on our command line.
 #
-now=dt.datetime.now()
-today=now-dt.timedelta(
-    hours=now.hour,
-    minutes=now.minute,
-    seconds=now.second,
-    microseconds=now.microsecond
-)
 ap=ArgumentParser()
 ap.add_argument('--attachments',action='store_true',help="Show attachments for each event that has at least one.")
 ap.add_argument('--debug',action='store_true',help="Turn on debugging output.")
@@ -121,6 +86,8 @@ ap.add_argument('--start',metavar='YYYY-MM-DD',action='store',type=dt.datetime.f
 ap.add_argument('calendars',metavar='CALENDAR',type=CaselessString,nargs='*',action='store',help="The name(s) of one or more calendars to be searched. By default, all calendars are searched.")
 opt=ap.parse_args()
 dc.enable(opt.debug)
+opt.start=opt.start.astimezone()
+opt.end=opt.end.astimezone()
 if dc:
     dc(f"{opt.end=}")
     dc(f"{opt.list=}")
@@ -129,20 +96,6 @@ if dc:
     dc(f"{opt.notes=}")
     dc(f"{opt.start=}")
     dc(f"{opt.calendars=}")
-
-# Delete our token.json file if this token has expired. This will lead the
-# API to re-authenticate and create a new token good for an hour.
-if os.path.exists(fn_auth_tokens):
-    dc(f"Token file ({fn_auth_tokens}) exists.")
-    with open(fn_auth_tokens) as f:
-        t=json.load(f)
-    x=dt.datetime.fromisoformat(t['expiry']).astimezone(tz_local)
-    dc(f"Token expires {x}")
-    if x<dt.datetime.now().replace(tzinfo=tz_local):
-        dc(f"Deleting expired token file ({fn_auth_tokens}). (Will re-authenticate.)")
-        os.unlink(fn_auth_tokens)
-else:
-    dc(f"Token file ({fn_auth_tokens}) not found. (Will re-authenticate.)")
 
  # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
@@ -180,7 +133,7 @@ class CalendarEvent():
             self.start=dt.datetime.fromisoformat(t['date']+'T00:00:00')
             self.allday=True
         if self.start.tzinfo is None:
-            self.start=self.start.replace(tzinfo=TZ)
+            self.start=self.start.replace(tzinfo=tz_cal)
 
         # The end value might be a dateTime or a date.
         t=ed.get('end',mt)
@@ -190,7 +143,7 @@ class CalendarEvent():
                 self.end+='T00:00:00'
             self.end=dt.datetime.fromisoformat(self.end)
         if self.end.tzinfo is None:
-            self.end=self.end.replace(tzinfo=TZ)
+            self.end=self.end.replace(tzinfo=tz_cal)
 
         # The calendar name might be a displayName or an email address.
         org=ed.get('organizer',mt)
@@ -257,7 +210,7 @@ class CalendarEvent():
             s.append(f"Location: {self.location}")
         if opt.notes and self.notes:
             s.extend(self.notes.split('\n')) # self.notes might contain its own newlines.
-        dc(s)
+        #dc(s)
         return when+(('\n'+' '*26)).join(s)
 
 def authenticate():
@@ -269,20 +222,29 @@ def authenticate():
     # Set up an authenticated Google Calendar API service.
     #
     creds=None
-    # The file token.json stores the user's access and refresh tokens, and is
+    # The file token.json stores the user's access and refresh token, and is
     # created automatically when the authorization flow completes for the first
     # time.
-    if os.path.exists(fn_auth_tokens):
-        creds=Credentials.from_authorized_user_file(fn_auth_tokens,SCOPES)
+    if os.path.exists(fn_auth_token):
+        creds=Credentials.from_authorized_user_file(fn_auth_token,SCOPES)
+        if dc:
+            dc(f"Token data from {fn_auth_token} ...")
+            dc(json.loads(creds.to_json()))
     # If there are no (valid) credentials available, let the user log in.
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                dc("Received exception {e} while refreshing token.")
+                flow=InstalledAppFlow.from_client_secrets_file(fn_credentials,SCOPES)
+                creds=flow.run_local_server(port=0,access_type='offline')
         else:
             flow=InstalledAppFlow.from_client_secrets_file(fn_credentials,SCOPES) 
-            creds=flow.run_local_server(port=0)
+            #creds=flow.run_local_server(port=0)
+            creds=flow.run_local_server(port=0,access_type='offline')
         # Save the credentials for the next run
-        with open(fn_auth_tokens,'w') as token:
+        with open(fn_auth_token,'w') as token:
             token.write(creds.to_json())
 
     service=build('calendar','v3',credentials=creds)
@@ -304,12 +266,13 @@ def get_calendar_events(service,calendar_id):
     return a list of CalendarEvent instances from that calendar.
     """
 
-    global TZ
+    global tz_cal
 
     # Set up timezones for opt.start and opt.end if they have none.
     if opt.start.tzinfo is None:
-        opt.start=opt.start.replace(tzinfo=ZoneInfo(str(TZ)))
-        opt.end=opt.end.replace(tzinfo=ZoneInfo(str(TZ)))
+        opt.start=opt.start.replace(tzinfo=ZoneInfo(str(tz_cal)))
+    if opt.end.tzinfo is None:
+        opt.end=opt.end.replace(tzinfo=ZoneInfo(str(tz_cal)))
 
     res=service.events().list(calendarId=calendar_id,
                               #timeMin=opt.start.isoformat()+'Z',
@@ -327,11 +290,11 @@ def get_calendar_events(service,calendar_id):
             pprint(res,stream=f,width=200)
 
     # Remember this calendar's default timezone.
-    TZ=res.get('timeZone')
-    if TZ is None:
+    tz_cal=res.get('timeZone')
+    if tz_cal is None:
         die(f"Google's Calendar API reports no default timezone for the {calendar_id} calendar.")
-    dc(f"Setting default timezone to {TZ} ...")
-    TZ=ZoneInfo(TZ)
+    dc(f"Setting default timezone to {tz_cal} ...")
+    tz_cal=ZoneInfo(tz_cal)
 
     # Get our list of event dictionaries from the API's response.
     # Convert them to CalendarEvent instances for easier handling.
