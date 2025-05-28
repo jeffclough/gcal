@@ -9,7 +9,8 @@ https://cloud.google.com
 3. Enable the Google Calendar API for the gcal project.
 """
 
-import datetime as dt,json,os,re,sys,zoneinfo
+import csv,io,json,os,re,sys,zoneinfo
+import datetime as dt
 from argparse import ArgumentParser
 from pprint import pprint
 from zoneinfo import ZoneInfo
@@ -63,6 +64,48 @@ os.makedirs(app_dir,0o700,exist_ok=True)
 fn_credentials=os.path.join(app_dir,'credentials.json')
 fn_auth_token=os.path.join(app_dir,'token.json')
 
+def list_from_csv(s):
+    """Given a CSV row as a string, return the colums from that row as
+    a list."""
+
+    with io.StringIO(s) as s:
+        r=csv.reader(s,quoting=csv.QUOTE_MINIMAL,skipinitialspace=True)
+        l=[c.rstrip() for c in next(r)] # Strip trailing whitespace.
+        return [c for c in l if c] # Return only non-blank columns.
+
+def set_from_csv(s):
+    """Given a CSV row as a string, return the colums from that row as
+    a set."""
+
+    return set(list_from_csv(s))
+
+#
+# See what's on our command line.
+#
+ap=ArgumentParser(
+    epilog='''The "free" and "busy" values of --show are just two ways to say you want to see whether each calendar event is marked as free or busy. Use --free-days to get a list of non-busy days.'''
+)
+ap.add_argument('--debug',action='store_true',help="Turn on debugging output.")
+ap.add_argument('--start',metavar='YYYY-MM-DD',action='store',type=dt.datetime.fromisoformat,default=today,help="Earliest date to search for calendar entries. (default: %(default).10s)")
+ap.add_argument('--end',metavar='YYYY-MM-DD',action='store',type=dt.datetime.fromisoformat,default=today+dt.timedelta(days=DEFAULT_CALENDAR_WINDOW),help="Latest date to search for calendar entries. (default: %(default).10s)")
+ap.add_argument('--list',action='store_true',help="List the calendars available to the current user. Then quit.")
+ap.add_argument('--free-days',action='store_true',help="Report dates that contain no events.")
+ap.add_argument('--max',metavar='N',action='store',type=positive_int,default=None,help="If given, this is the maximum number of entries to find.")
+ap.add_argument('--not',metavar="CALENDAR[,...]",dest='no',action='store',type=set_from_csv,default=set(),help="One or more calendars NOT to report events for. Separate multiple caldar names with commas.")
+ap.add_argument('--show',action='store',type=set_from_csv,default=set(),help="Set extra event attributes to be shown. Choices are attachments, busy, day, free, location, and notes. These maybe be combined in a single value of comma-separated items.")
+ap.add_argument('--location',action='store_true',help="Show the location for each event that has a location.")
+ap.add_argument('--notes',action='store_true',help="Show notes for each event that has notes.")
+ap.add_argument('calendars',metavar='CALENDAR',type=CaselessString,nargs='*',action='store',help="The name(s) of one or more calendars to be searched. By default, all calendars are searched.")
+opt=ap.parse_args()
+
+# Cook a few of our options' values a bit.
+dc.enable(opt.debug)
+# Use the local timezone for start and end if no TZ is given.
+if opt.start.tzinfo is None:
+    opt.start=opt.start.astimezone()
+if opt.end.tzinfo is None:
+    opt.end=opt.end.astimezone()
+
 # Whether and where to record API responses.
 RECORD_RESPONSES=bool(dc) # Tie this to whether we're writing debug messsages.
 RESPONSES_FILE=os.path.join(app_dir,'api-responses')
@@ -71,34 +114,29 @@ if RECORD_RESPONSES and os.path.exists(RESPONSES_FILE):
     # want only responses from the current run.
     os.unlink(RESPONSES_FILE)
 
-#
-# See what's on our command line.
-#
-ap=ArgumentParser()
-ap.add_argument('--attachments',action='store_true',help="Show attachments for each event that has at least one.")
-ap.add_argument('--debug',action='store_true',help="Turn on debugging output.")
-ap.add_argument('--end',metavar='YYYY-MM-DD',action='store',type=dt.datetime.fromisoformat,default=today+dt.timedelta(days=DEFAULT_CALENDAR_WINDOW),help="Latest date to search for calendar entries. (default: %(default).10s)")
-ap.add_argument('--list',action='store_true',help="List the calendars available to the current user. Then quit.")
-ap.add_argument('--location',action='store_true',help="Show the location for each event that has a location.")
-ap.add_argument('--max',metavar='N',action='store',type=positive_int,default=None,help="If given, this is the maximum number of entries to find.")
-ap.add_argument('--notes',action='store_true',help="Show notes for each event that has notes.")
-ap.add_argument('--start',metavar='YYYY-MM-DD',action='store',type=dt.datetime.fromisoformat,default=today,help="Earliest date to search for calendar entries. (default: %(default).10s)")
-ap.add_argument('calendars',metavar='CALENDAR',type=CaselessString,nargs='*',action='store',help="The name(s) of one or more calendars to be searched. By default, all calendars are searched.")
-opt=ap.parse_args()
-dc.enable(opt.debug)
-opt.start=opt.start.astimezone()
-opt.end=opt.end.astimezone()
 if dc:
+    dc(f"{opt.start=}")
     dc(f"{opt.end=}")
     dc(f"{opt.list=}")
-    dc(f"{opt.location=}")
     dc(f"{opt.max=}")
-    dc(f"{opt.notes=}")
-    dc(f"{opt.start=}")
+    dc(f"{opt.no=}")
+    dc(f"{opt.show=}")
     dc(f"{opt.calendars=}")
+    dc(f"{RECORD_RESPONSES=}")
+    dc(f"{RESPONSES_FILE=}")
 
  # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+def day_range(start,end,inc=ONE_DAY):
+    """This generator function yields each day included in the given
+    start and end datetime values."""
+
+    d=dt.date(start.year,start.month,start.day)
+    end_day=dt.date(end.year,end.month,end.day)
+    while d<end_day or (d==end_day and (end.hour or end.minute or end.second)):
+        yield d
+        d+=inc
 
 class CalendarEvent():
     def __init__(self,event_dict):
@@ -109,6 +147,7 @@ class CalendarEvent():
             start (datetime)
             end (datetime)
             allday (boolean)
+            busy (boolean)
             calendar (str)
             name (str)
             location (str)
@@ -135,6 +174,9 @@ class CalendarEvent():
         if self.start.tzinfo is None:
             self.start=self.start.replace(tzinfo=tz_cal)
 
+        # Get he free/busy status of this event.
+        self.busy=ed.get('transparency','opaque')=='opaque'
+
         # The end value might be a dateTime or a date.
         t=ed.get('end',mt)
         self.end=t.get('dateTime',t.get('date'))
@@ -144,6 +186,10 @@ class CalendarEvent():
             self.end=dt.datetime.fromisoformat(self.end)
         if self.end.tzinfo is None:
             self.end=self.end.replace(tzinfo=tz_cal)
+
+        ## Ensure one-day events begin and end on the same day.
+        #if self.allday:
+        #    self.end-=ONE_DAY
 
         # The calendar name might be a displayName or an email address.
         org=ed.get('organizer',mt)
@@ -184,17 +230,49 @@ class CalendarEvent():
         # for a in e.attachments:
         #     print(f"{a.title}: {a.fileUrl}")
 
+    def occurs_on(self,day):
+        """Return True if this event occurs on the givne day."""
+
+        return day in day_range(self.start,self.end)
+
     def __str__(self):
+        # Set default start and end formats and corresponding widths.
+        sdfmt=edfmt='%m-%d'
+        sw=ew=5
+        # Add to strftime format as called for.
+        if 'year' in opt.show:
+            sdfmt='%Y-'+sdfmt
+            sw+=5
+        if 'day' in opt.show:
+            sdfmt='%a '+sdfmt
+            sw+=4
+            edfmt='%a '+edfmt
+            ew+=4
+        if 'busy' in opt.show:
+            sdfmt=('busy ' if self.busy else 'free ')+sdfmt
+            sw+=5
         if self.allday:
-            when=f"{str(self.start):.10}:               "
+            end=self.end-ONE_DAY
+            if self.start==end:
+                when=f"{self.start.strftime(sdfmt)}: "+(' '*ew)
+               #when=f"{str(self.start):.10}:               "
+            else:
+                when=f"{self.start.strftime(sdfmt)} - {self.end.strftime(edfmt)}: "
+               #when=f"{str(self.start):.10} - {str(end):.10}:  "
             s=[f"{self.name} ({self.calendar})"]
         else:
+            sdfmt+=' %H:%M'
+            sw+=6
             if self.start.date()==self.end.date():
-                when=f"{str(self.start):.16} - {str(self.end)[11:16]}: "
+                edfmt=' %H:%M'
+                ew=6
+                when=f"{self.start.strftime(sdfmt)} - {self.end.strftime(edfmt)}: "
             else:
-                when=f"{str(self.start):.16} - {str(self.end):.16}: "
+                edfmt=' %H:%M'
+                ew+=6
+                when=f"{self.start.strftime(sdfmt)} - {self.end.strftime(edfmt)}: "
             s=[f"{self.name} ({self.calendar})"]
-        if opt.attachments and self.attachments:
+        if 'attachments' in opt.show and self.attachments:
             if len(self.attachments)==1:
                 s.extend([
                     f"Attachment:",
@@ -206,9 +284,9 @@ class CalendarEvent():
                     f"  {i+1}. {a.title}: {a.fileUrl}"
                         for i,a in enumerate(self.attachments)
                 )
-        if opt.location and self.location:
+        if 'location' in opt.show and self.location:
             s.append(f"Location: {self.location}")
-        if opt.notes and self.notes:
+        if 'notes' in opt.show and self.notes:
             s.extend(self.notes.split('\n')) # self.notes might contain its own newlines.
         #dc(s)
         return when+(('\n'+' '*26)).join(s)
@@ -275,11 +353,9 @@ def get_calendar_events(service,calendar_id):
         opt.end=opt.end.replace(tzinfo=ZoneInfo(str(tz_cal)))
 
     res=service.events().list(calendarId=calendar_id,
-                              #timeMin=opt.start.isoformat()+'Z',
-                              #timeMax=opt.end.isoformat()+'Z',
                               timeMin=opt.start.isoformat(),
                               timeMax=(opt.end+ONE_DAY).isoformat(),
-                              maxResults=1000,singleEvents=True,
+                              maxResults=250,singleEvents=True,
                               orderBy='startTime'
                          ).execute()
     # For diagnostic and exploratory purposes, it is helpful to be able
@@ -320,6 +396,7 @@ def main():
             cname:cid
             for cname,cid in calendars
                 if not cid.endswith('@group.v.calendar.google.com')
+                    and cname not in opt.no
                     and (not opt.calendars or cname in opt.calendars)
         }
 
@@ -343,6 +420,21 @@ def main():
 
         if opt.max and opt.max<len(events):
             del events[opt.max:]
+
+        if opt.free_days:
+            # Assume they're all free.
+            free_days=set(list(day_range(opt.start,opt.end)))
+            # Remove busy days.
+            for e in events:
+                if e.busy:
+                    for d in day_range(e.start,e.end):
+                        if d in free_days:
+                            free_days.remove(d)
+            # Show the user the free days we're left with.
+            free_days=sorted(list(free_days))
+            for d in free_days:
+                print(d.strftime('%Y-%m-%d %a'))
+            sys.exit(0)
 
         # Show the user what we've found.
         while events:
