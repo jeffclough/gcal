@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jc-gcal"
+version = "0.1.0"
+authors = [
+  { name="Jeff Clough", email="jeff@cloughcottage.com" },
+]
+description = "A command line application to interact with Google Calendar"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "jc-handy-helpers",
+    "jc-debug",
+    "google-api-python-client",
+    "google-auth-httplib2",
+    "google-auth-oauthlib",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/jeffclough/gcal"
+"Bug Tracker" = "https://github.com/jeffclough/gcal/issues"
+
+[project.scripts]
+gcal = "gcal.main:main"
+
+[tool.setuptools.packages]
+find = {} # This is equivalent to find_packages()

@@ -13,6 +13,7 @@ import csv,io,json,os,re,sys,zoneinfo
 import datetime as dt
 from argparse import ArgumentParser
 from pprint import pprint
+from time import time as epoch_time
 from zoneinfo import ZoneInfo
 
 from debug import DebugChannel
@@ -57,12 +58,16 @@ SCOPES=['https://www.googleapis.com/auth/calendar.readonly']
 
 #
 # Make sure our application directory exists. Our Google API credentials
-# are stored here, so make it a private directory.
+# are stored here, so make it a private directory. We'll also store a
+# JSON cache for each calendar we access here.
 #
 app_dir=os.path.expanduser(f"~/.local/{prog.name}")
 os.makedirs(app_dir,0o700,exist_ok=True)
 fn_credentials=os.path.join(app_dir,'credentials.json')
 fn_auth_token=os.path.join(app_dir,'token.json')
+cal_cache_dir=os.path.join(app_dir,'cal_cache')
+os.makedirs(cal_cache_dir,0o700,exist_ok=True)
+cal_cache_ttl=5*3600 # Cache files are only good for 5 minutes.
 
 def list_from_csv(s):
     """Given a CSV row as a string, return the colums from that row as
@@ -79,6 +84,21 @@ def set_from_csv(s):
 
     return set(list_from_csv(s))
 
+@dc
+def date_validator(s):
+    """Given a date string, return a datetime.datetime instance (or
+    raise an ValueError exception."""
+
+    m=re.match(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})$',s)
+    dc(f"{m=}")
+    if not m:
+        raise ValueError(f"Invalid date format: {s!r}")
+    dc(f"{m.groups()=}")
+    y,m,d=(int(x) for x in m.groups())
+    d=dt.datetime(y,m,d,0,0,0)
+    dc(f"{d=}")
+    return d
+
 #
 # See what's on our command line.
 #
@@ -86,8 +106,8 @@ ap=ArgumentParser(
     epilog='''The "free" and "busy" values of --show are just two ways to say you want to see whether each calendar event is marked as free or busy. Use --free-days to get a list of non-busy days.'''
 )
 ap.add_argument('--debug',action='store_true',help="Turn on debugging output.")
-ap.add_argument('--start',metavar='YYYY-MM-DD',action='store',type=dt.datetime.fromisoformat,default=today,help="Earliest date to search for calendar entries. (default: %(default).10s)")
-ap.add_argument('--end',metavar='YYYY-MM-DD',action='store',type=dt.datetime.fromisoformat,default=today+dt.timedelta(days=DEFAULT_CALENDAR_WINDOW),help="Latest date to search for calendar entries. (default: %(default).10s)")
+ap.add_argument('--start',metavar='YYYY-MM-DD',action='store',default=today,help="Earliest date to search for calendar entries. (default: %(default).10s)")
+ap.add_argument('--end',metavar='YYYY-MM-DD',action='store',default=today+dt.timedelta(days=DEFAULT_CALENDAR_WINDOW),help="Latest date to search for calendar entries. (default: %(default).10s)")
 ap.add_argument('--list',action='store_true',help="List the calendars available to the current user. Then quit.")
 ap.add_argument('--free-days',action='store_true',help="Report dates that contain no events.")
 ap.add_argument('--max',metavar='N',action='store',type=positive_int,default=None,help="If given, this is the maximum number of entries to find.")
@@ -101,6 +121,10 @@ opt=ap.parse_args()
 # Cook a few of our options' values a bit.
 dc.enable(opt.debug)
 # Use the local timezone for start and end if no TZ is given.
+if isinstance(opt.start,str):
+    opt.start=date_validator(opt.start)
+if isinstance(opt.end,str):
+    opt.end=date_validator(opt.end)
 if opt.start.tzinfo is None:
     opt.start=opt.start.astimezone()
 if opt.end.tzinfo is None:
@@ -139,6 +163,94 @@ def day_range(start,end,inc=ONE_DAY):
         d+=inc
 
 class CalendarEvent():
+    # Used for storing and parsing cached datetime values.
+    aware_time_fmt="%Y-%m-%dT%H:%M:%S%z"
+    naive_time_fmt="%Y-%m-%dT%H:%M:%S"
+
+    class JSONEncoder(json.JSONEncoder):
+        """A JSON encoder that handles datetime objects by converting
+        them to strings."""
+
+        def default(self,o):
+            """If o is a datetime value, return the string form of that
+            value. Otherwise, let the superclass do its thing."""
+
+            if isinstance(o,datetime.datetime):
+                # Convert timezone-aware datetime to string
+                return o.strftime(CalendarEvent.a_time_fmt)
+            # Let the base class default method raise the TypeError for other types
+            return super().default(self,o)
+
+    class JSONDecoder(json.JSONDecoder):
+        """A JSON decoder that recognizes datetime strings and parses
+        them to datetime values."""
+
+        _naive_pat=re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$')
+        _aware_pat=re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[-+]\d4$')
+
+        def default(self,s):
+            """If the given string is that of a formatted datetime
+            value, parse that back to a datetime value and return that.
+            Both timezone-aware and -naive values are handled.
+            Otherwise, let the superclass do its thing."""
+
+            if _aware_pat.match(s):
+                return dt.datetime.strptime(s,aware_time_fmt)
+            if _naive_pat.match(s):
+                return dt.datetime.strptime(s,naive_time_fmt)
+            return super().default(self,s)
+
+   #class JSONDecoder(json.JSONDecoder):
+   #    """Custom JSONDecoder that handles datetime strings by
+   #    converting them back to datetime.datetime objects in specific
+   #    dictionary fields."""
+   #
+   #    def __init__(self, *args, **kwargs):
+   #        super().__init__(object_hook=self.object_hook, *args, **kwargs)
+   #
+   #    def object_hook(self, obj):
+   #        # Check for specific keys that are known to contain datetime strings
+   #        if 'start_time' in obj and 'end_time' in obj:
+   #            try:
+   #                obj['start_time'] = datetime.datetime.strptime(obj['start_time'], DATETIME_FORMAT)
+   #                obj['end_time'] = datetime.datetime.strptime(obj['end_time'], DATETIME_FORMAT)
+   #            except ValueError:
+   #                print(f"Warning: Could not parse datetime in object_hook: {obj}")
+   #                pass # Keep as string if parsing fails
+   #        return obj
+
+    def to_dict(self):
+        """Return this CalendarEvent as a dictionary."""
+
+        return dict(
+            start=self.start,
+            end=self.end,
+            allday=self.allday,
+            busy=self.busy,
+            calendar=self.calendar,
+            name=self.name,
+            location=self.location,
+            notes=self.notes,
+            attachments=self.attachments
+        )
+
+    @classmethod
+    def from_dict(cls,d):
+        """Create and return a new CalendarEvent instance from the given
+        dictionary."""
+
+        e=CalendarEvent(None)
+        e.start=d['start']
+        e.end=d['end']
+        e.allday=d['allday']
+        e.busy=d['busy']
+        e.calendar=d['calendar']
+        e.name=d['name']
+        e.location=d['location']
+        e.notes=d['notes']
+        e.attachments=d['attachments']
+        return e
+    
     def __init__(self,event_dict):
         """
         Set these properties based on the given calendar dictionary
@@ -157,6 +269,19 @@ class CalendarEvent():
         Raise ValueError if this dictionary doesn't look like a calendar
         event.
         """
+
+        if not event_dict:
+            # We're just initializing an empty event.
+            self.start=None
+            self.end=None
+            self.allday=None
+            self.busy=None
+            self.calendar=None
+            self.name=None
+            self.location=None
+            self.notes=None
+            self.attachments=None
+            return
 
         ed=event_dict
         mt={}
@@ -291,6 +416,102 @@ class CalendarEvent():
         #dc(s)
         return when+(('\n'+' '*26)).join(s)
 
+class Calendar(list):
+    """A specialized list to hold CalendarEntry items and support
+    caching."""
+
+    @dc
+    def __init__(self,name,calendar_id,events=None):
+        self.name=name
+        self.calendar_id=calendar_id
+        super().__init__(events if events else [])
+
+    @staticmethod
+    def get_cache_filename(calendar_name):
+        """Compose and return the full pathname to this Calendar's
+        cache file."""
+
+        return os.path.join(cal_cache_dir,f"{calendar_name}.json")
+
+    def to_cache(self):
+        """Write the given list of events to the cache for the named
+        file."""
+
+        filename=Calendar.get_cache_filename(self.name)
+        dc(f"{filename=}")
+        with open(filename,'w',encoding='utf-8') as f:
+            d=dict(
+                type=self.__class__.__name__,
+                written=dt.datetime.now().astimezone(),
+                name=self.name,
+                calendar_id=self.calendar_id,
+                data=self
+            )
+            dc(d)
+            json.dump(d,f,indent=2,cls=CalandarEntry.JSONEncode)
+
+    @classmethod
+    def from_cache(cls,calendar_name):
+        """Read and return a list of cached events from the named file. If
+        the cache file isn't there, or if it's more than 5 minutes old,
+        return None."""
+
+       #if not os.path.isfile(filename)
+       #   or os.path.getmtime(filename)<epoch_time()-cal_cache_ttl:
+       #    return None
+
+        filename=Calendar.get_cache_filename(calendar_name)
+        dc(f"{filename=}")
+        with open(filename,'r',encoding='utf-8') as f:
+            cache=json.load(f,cls=CalendarEntry.JSONDecode)
+            dc("cache:")(cache)
+            cache=type('',(),cache)
+            if d.written<now-cal_cache_ttl:
+                return None
+            assert cache.type==cls.__name__,f"Wrong data type found in cache file {filename}."
+            assert cache.name==calendar_name,f"Wrong calendar found in cache file {filename}."
+            return Calendar(cache.name,cache.data)
+
+    def get_events(self,calendar_service,calendar_id):
+        """
+        Given an active Calendar API service and the ID of a calendar,
+        return a list of CalendarEvent instances from that calendar.
+        """
+
+        global tz_cal
+
+        # Set up timezones for opt.start and opt.end if they have none.
+        if opt.start.tzinfo is None:
+            opt.start=opt.start.replace(tzinfo=ZoneInfo(str(tz_cal)))
+        if opt.end.tzinfo is None:
+            opt.end=opt.end.replace(tzinfo=ZoneInfo(str(tz_cal)))
+
+        res=calendar_service.events().list(
+            calendarId=calendar_id,
+            timeMin=opt.start.isoformat(),
+            timeMax=(opt.end+ONE_DAY).isoformat(),
+            maxResults=250,singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+        # For diagnostic and exploratory purposes, it is helpful to be able
+        # to see the raw response dictionary the API returns.
+        if RECORD_RESPONSES:
+            with open(RESPONSES_FILE,'a') as f:
+                print('\n---- calendar ----',file=f)
+                pprint(res,stream=f,width=200)
+
+        # Remember this calendar's default timezone.
+        tz_cal=res.get('timeZone')
+        if tz_cal is None:
+            die(f"Google's Calendar API reports no default timezone for the {calendar_id} calendar.")
+        dc(f"Setting default timezone to {tz_cal} ...")
+        tz_cal=ZoneInfo(tz_cal)
+
+        # Get our list of event dictionaries from the API's response.
+        # Convert them to CalendarEvent instances for easier handling.
+        events=res.get('items',[])
+        return [CalendarEvent(e) for e in events]
+            
 def authenticate():
     """
     Return the authenticated API service.
@@ -338,45 +559,6 @@ def authenticate():
 
     return service
 
-def get_calendar_events(service,calendar_id):
-    """
-    Given an active Calendar API service and the ID of a calendar,
-    return a list of CalendarEvent instances from that calendar.
-    """
-
-    global tz_cal
-
-    # Set up timezones for opt.start and opt.end if they have none.
-    if opt.start.tzinfo is None:
-        opt.start=opt.start.replace(tzinfo=ZoneInfo(str(tz_cal)))
-    if opt.end.tzinfo is None:
-        opt.end=opt.end.replace(tzinfo=ZoneInfo(str(tz_cal)))
-
-    res=service.events().list(calendarId=calendar_id,
-                              timeMin=opt.start.isoformat(),
-                              timeMax=(opt.end+ONE_DAY).isoformat(),
-                              maxResults=250,singleEvents=True,
-                              orderBy='startTime'
-                         ).execute()
-    # For diagnostic and exploratory purposes, it is helpful to be able
-    # to see the raw response dictionary the API returns.
-    if RECORD_RESPONSES:
-        with open(RESPONSES_FILE,'a') as f:
-            print('\n---- calendar ----',file=f)
-            pprint(res,stream=f,width=200)
-
-    # Remember this calendar's default timezone.
-    tz_cal=res.get('timeZone')
-    if tz_cal is None:
-        die(f"Google's Calendar API reports no default timezone for the {calendar_id} calendar.")
-    dc(f"Setting default timezone to {tz_cal} ...")
-    tz_cal=ZoneInfo(tz_cal)
-
-    # Get our list of event dictionaries from the API's response.
-    # Convert them to CalendarEvent instances for easier handling.
-    events=res.get('items',[])
-    return [CalendarEvent(e) for e in events]
-            
 def main():
     try:
         # Authenticate and connect to the Google Calendar API service.
@@ -412,7 +594,9 @@ def main():
         events=[]
         for cname,cid in calendars.items():
             dc(f"Calendar {cname} (id={cid})").indent()
-            events.extend(get_calendar_events(service,cid))
+            cal=Calendar(cname,cid)
+            l=cal.get_events(service,cid)
+            events.extend(l)
             dc.undent()
 
         # Sort our CalenderEvent objects by start time.
