@@ -143,9 +143,9 @@ if dc:
     dc(f"{opt.end=}")
     dc(f"{opt.list=}")
     dc(f"{opt.max=}")
-    dc(f"{opt.no=}")
+    dc(opt.no,'opt.no')
     dc(f"{opt.show=}")
-    dc(f"{opt.calendars=}")
+    dc(opt.calendars,'opt.calendars')
     dc(f"{RECORD_RESPONSES=}")
     dc(f"{RESPONSES_FILE=}")
 
@@ -423,7 +423,7 @@ class Calendar(list):
     @dc
     def __init__(self,name,calendar_id,events=None):
         self.name=name
-        self.calendar_id=calendar_id
+        self.id=calendar_id
         super().__init__(events if events else [])
 
     @staticmethod
@@ -444,7 +444,7 @@ class Calendar(list):
                 type=self.__class__.__name__,
                 written=dt.datetime.now().astimezone(),
                 name=self.name,
-                calendar_id=self.calendar_id,
+                calendar_id=self.id,
                 data=self
             )
             dc(d)
@@ -464,7 +464,7 @@ class Calendar(list):
         dc(f"{filename=}")
         with open(filename,'r',encoding='utf-8') as f:
             cache=json.load(f,cls=CalendarEntry.JSONDecode)
-            dc("cache:")(cache)
+            dc(cache,'cache')
             cache=type('',(),cache)
             if d.written<now-cal_cache_ttl:
                 return None
@@ -570,7 +570,6 @@ def main():
             (c.get('summary'),c.get('id'))
                 for c in calendar_list.get('items',list())
         ]
-        dc(f"Calendars found: {len(calendars)}")
         dc(f"Subtracting Google's group calendars (Weather, etc.) and any calendars not given on the command line ...")
         # Convert this list of tuples to a {name:id) dictionary, filtering
         # as we go.
@@ -581,6 +580,7 @@ def main():
                     and cname not in opt.no
                     and (not opt.calendars or cname in opt.calendars)
         }
+        dc(list(calendars.keys()),'calendars.keys()')
 
         if opt.list:
             # Show available calendars, and quit.
