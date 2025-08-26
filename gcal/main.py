@@ -89,15 +89,18 @@ def date_validator(s):
     """Given a date string, return a datetime.datetime instance (or
     raise an ValueError exception."""
 
-    m=re.match(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})$',s)
-    dc(f"{m=}")
-    if not m:
-        raise ValueError(f"Invalid date format: {s!r}")
-    dc(f"{m.groups()=}")
-    y,m,d=(int(x) for x in m.groups())
-    d=dt.datetime(y,m,d,0,0,0)
-    dc(f"{d=}")
-    return d
+    try:
+        m=re.match(r'(?:(\d{4})[-/])?(\d{1,2})[-/](\d{1,2})$',s)
+        dc(f"{m=}")
+        if not m:
+            raise ValueError(f"Invalid date format: {s!r}")
+        dc(f"{m.groups()=}")
+        y,m,d=(int(x) if x else now.year for x in m.groups())
+        d=dt.datetime(y,m,d,0,0,0)
+        dc(f"{d=}")
+        return d
+    except Exception as e:
+        die(f"Error on date {s!r}: {str(e)}")
 
 #
 # See what's on our command line.
